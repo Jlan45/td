@@ -45,6 +45,22 @@ func (c *Client) Pool(max int64) (CloseInvoker, error) {
 	}
 
 	s := c.session.Load()
+	if c.dataConnPFS {
+		return c.createPool(s.DC, max, func() pool.Conn {
+			id := c.connsCounter.Inc()
+			return c.createConnWith(
+				c.dataConnOpts(), c.asPrimaryDataConnHandler(),
+				id, manager.ConnModeData, nil, func(err error) {
+					// The primary connection uses the permanent key directly and
+					// stays the authority on it, so a temp key bind failure here
+					// must not wipe the primary session.
+					if c.onDead != nil {
+						c.onDead(err)
+					}
+				},
+			)
+		})
+	}
 	return c.createPool(s.DC, max, func() pool.Conn {
 		id := c.connsCounter.Inc()
 		return c.createConn(id, manager.ConnModeData, nil, func(err error) {
@@ -78,7 +94,8 @@ func (c *Client) dc(
 		log.Int("candidates", len(dcList)),
 	)
 
-	opts := c.opts
+	opts := c.dataConnOpts()
+	primaryDataPFS := mode != manager.ConnModeCDN && c.isPrimaryDataPFS(dcID)
 	if mode == manager.ConnModeCDN {
 		// CDN datacenters reject auth.bindTempAuthKey with CDN_METHOD_INVALID:
 		// a CDN connection must authenticate with a permanent key only, without
@@ -139,6 +156,9 @@ func (c *Client) dc(
 			// CDN pools do not process updates and use dedicated session store.
 			handler = c.asCDNHandler()
 		}
+		if primaryDataPFS {
+			handler = c.asPrimaryDataConnHandler()
+		}
 		options.Logger = c.log.Named("conn").With(
 			log.Int64("conn_id", id),
 			log.Int("dc_id", dcID),
@@ -155,6 +175,14 @@ func (c *Client) dc(
 					if mode == manager.ConnModeCDN {
 						// CDN dead handler also manages CDN key invalidation.
 						c.handleCDNConnDead(dcID, err)
+						return
+					}
+					if primaryDataPFS {
+						// Same as Pool: the permanent key belongs to the
+						// primary connection and is not dropped from here.
+						if c.onDead != nil {
+							c.onDead(err)
+						}
 						return
 					}
 					c.handleDCConnDead(dcID, err)
