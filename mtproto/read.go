@@ -27,6 +27,13 @@ const (
 // errRejected is returned on invalid message that should not be processed.
 var errRejected = errors.New("message rejected")
 
+// errDuplicate is returned on already processed message. It is not handled
+// again but still acknowledged: after a reconnect the server resends messages
+// whose ack was lost with the previous connection and keeps resending them
+// until acknowledged (TDLib check_packet code 1 -> send_ack, Telegram Desktop
+// and Android ack before deduplication).
+var errDuplicate = errors.Wrap(errRejected, "already processed")
+
 func checkMessageID(now time.Time, rawID int64) error {
 	id := proto.MessageID(rawID)
 
@@ -64,7 +71,7 @@ func (c *Conn) decryptMessage(b *bin.Buffer) (*crypto.EncryptedMessageData, erro
 		return nil, errors.Wrapf(err, "bad message id %d", msg.MessageID)
 	}
 	if !c.receivedIDs().Consume(msg.MessageID) {
-		return nil, errors.Wrapf(errRejected, "duplicate or too low message id %d", msg.MessageID)
+		return msg, errors.Wrapf(errDuplicate, "duplicate or too low message id %d", msg.MessageID)
 	}
 
 	return msg, nil
@@ -72,6 +79,13 @@ func (c *Conn) decryptMessage(b *bin.Buffer) (*crypto.EncryptedMessageData, erro
 
 func (c *Conn) consumeMessage(ctx context.Context, buf *bin.Buffer) error {
 	msg, err := c.decryptMessage(buf)
+	if errors.Is(err, errDuplicate) {
+		c.log.Debug(ctx, "Ignoring already processed message", log.Error(err))
+		if msg.SeqNo&0x01 != 0 {
+			return c.enqueueAck(ctx, msg.MessageID)
+		}
+		return nil
+	}
 	if errors.Is(err, errRejected) {
 		c.log.Warn(ctx, "Ignoring rejected message", log.Error(err))
 		return nil
@@ -94,23 +108,29 @@ func (c *Conn) consumeMessage(ctx context.Context, buf *bin.Buffer) error {
 
 	needAck := (msg.SeqNo & 0x01) != 0
 	if needAck {
-		// Enqueue message id for acknowledge. This can block if the ack loop
-		// is stuck (e.g. writing acks over a half-open connection), which would
-		// stall message consumption. Trace slow enqueues to surface it.
-		start := c.clock.Now()
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case c.ackSendChan <- msg.MessageID:
-			if waited := c.clock.Now().Sub(start); waited > slowWriteThreshold {
-				c.log.Warn(ctx, "Slow ack enqueue (ack loop may be stalled)",
-					log.Int64("msg_id", msg.MessageID),
-					log.Duration("waited", waited),
-				)
-			}
-		}
+		return c.enqueueAck(ctx, msg.MessageID)
 	}
 
+	return nil
+}
+
+// enqueueAck queues msg_id for acknowledgement.
+func (c *Conn) enqueueAck(ctx context.Context, msgID int64) error {
+	// Enqueue message id for acknowledge. This can block if the ack loop
+	// is stuck (e.g. writing acks over a half-open connection), which would
+	// stall message consumption. Trace slow enqueues to surface it.
+	start := c.clock.Now()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case c.ackSendChan <- msgID:
+		if waited := c.clock.Now().Sub(start); waited > slowWriteThreshold {
+			c.log.Warn(ctx, "Slow ack enqueue (ack loop may be stalled)",
+				log.Int64("msg_id", msgID),
+				log.Duration("waited", waited),
+			)
+		}
+	}
 	return nil
 }
 

@@ -158,3 +158,54 @@ func TestSessionReplayProtectionKeptAcrossConnections(t *testing.T) {
 	a.NoError(second.connect(context.Background()))
 	a.False(second.receivedIDs().Consume(msgID), "message from previous connection must be rejected")
 }
+
+// encryptFromServer encrypts payload as a server message of the session.
+func encryptFromServer(t *testing.T, key crypto.AuthKey, sessionID, msgID int64, seqNo int32) *bin.Buffer {
+	t.Helper()
+	var payload bin.Buffer
+	require.NoError(t, payload.Encode(&mt.Pong{MsgID: 1, PingID: 1}))
+	var out bin.Buffer
+	require.NoError(t, crypto.NewServerCipher(rand.Reader).Encrypt(key, crypto.EncryptedMessageData{
+		SessionID:              sessionID,
+		MessageID:              msgID,
+		SeqNo:                  seqNo,
+		MessageDataLen:         int32(payload.Len()),
+		MessageDataWithPadding: payload.Copy(),
+	}, &out))
+	return &out
+}
+
+// A content message resent by the server after reconnect is not handled again
+// but must still be acknowledged, otherwise the server keeps resending it
+// (TDLib: "Packet is ignored" -> send_ack).
+func TestDuplicateContentMessageIsAcked(t *testing.T) {
+	a := require.New(t)
+	key := crypto.Key{1}.WithID()
+	state := NewSessionState()
+
+	c := newResumeTestConn(state, key)
+	c.cipher = crypto.NewClientCipher(rand.Reader)
+	c.ackSendChan = make(chan int64, 4)
+	a.NoError(c.connect(context.Background()))
+	sessionID := c.session().ID
+	msgID := int64(proto.NewMessageID(time.Now(), proto.MessageFromServer))
+
+	a.NoError(c.consumeMessage(context.Background(), encryptFromServer(t, key, sessionID, msgID, 1)))
+	a.Equal(msgID, <-c.ackSendChan)
+	a.Equal(uint64(1), c.recvMessages.Load())
+
+	// Resent duplicate: acked, not handled.
+	a.NoError(c.consumeMessage(context.Background(), encryptFromServer(t, key, sessionID, msgID, 1)))
+	a.Equal(msgID, <-c.ackSendChan)
+	a.Equal(uint64(1), c.recvMessages.Load(), "duplicate must not be handled")
+
+	// Duplicate service message (even seqno) needs no ack.
+	svcID := int64(proto.NewMessageID(time.Now(), proto.MessageFromServer))
+	a.NoError(c.consumeMessage(context.Background(), encryptFromServer(t, key, sessionID, svcID, 2)))
+	a.NoError(c.consumeMessage(context.Background(), encryptFromServer(t, key, sessionID, svcID, 2)))
+	select {
+	case id := <-c.ackSendChan:
+		t.Fatalf("unexpected ack %d", id)
+	default:
+	}
+}
