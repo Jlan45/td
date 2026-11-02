@@ -211,4 +211,5 @@ func (c *Conn) dropPFSKeys() {
 	c.sessionID = 0
 	c.tempKeyExpiry = 0
 	c.sessionMux.Unlock()
+	c.state().reset()
 }

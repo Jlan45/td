@@ -63,7 +63,7 @@ func (c *Conn) decryptMessage(b *bin.Buffer) (*crypto.EncryptedMessageData, erro
 	if err := checkMessageID(c.clock.Now(), msg.MessageID); err != nil {
 		return nil, errors.Wrapf(err, "bad message id %d", msg.MessageID)
 	}
-	if !c.messageIDBuf.Consume(msg.MessageID) {
+	if !c.receivedIDs().Consume(msg.MessageID) {
 		return nil, errors.Wrapf(errRejected, "duplicate or too low message id %d", msg.MessageID)
 	}
 

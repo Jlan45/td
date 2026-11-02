@@ -87,8 +87,15 @@ func (c *Client) primaryDC(dc int) mtproto.Dialer {
 	}
 }
 
+// createPrimaryConn creates primary connection. Successive primary
+// connections share one MTProto session (c.primarySession), so a reconnect
+// moves the session to the new TCP connection instead of opening a second main
+// session on the same authorization (AUTH_KEY_DUPLICATED). Pool and data
+// connections run concurrently with the primary one and keep their own session.
 func (c *Client) createPrimaryConn(setup manager.SetupCallback) pool.Conn {
-	return c.createConn(0, c.defaultMode, setup, c.onDead)
+	opts := c.opts
+	opts.Session = c.primarySession
+	return c.createConnWith(opts, c.asHandler(), 0, c.defaultMode, setup, c.onDead)
 }
 
 func (c *Client) createConn(

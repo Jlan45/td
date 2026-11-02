@@ -10,12 +10,25 @@ import (
 )
 
 type connection struct {
+	mux sync.Mutex
 	transport.Conn
 	sent atomic.Bool
 }
 
 func (conn *connection) sentCreated() bool {
 	return conn.sent.Swap(true)
+}
+
+// current returns the latest transport connection of the session.
+func (conn *connection) current() transport.Conn {
+	conn.mux.Lock()
+	defer conn.mux.Unlock()
+	return conn.Conn
+}
+
+// Close closes the latest transport connection of the session.
+func (conn *connection) Close() error {
+	return conn.current().Close()
 }
 
 // users contains all server connections and sessions.
@@ -34,11 +47,18 @@ func newUsers() *users {
 	}
 }
 
+// createConnection returns connection state of session key, binding the session
+// to tConn. Like Telegram servers, a session that moved to a new transport
+// connection (client reconnect) is served over the newest one and does not get
+// new_session_created again.
 func (c *users) createConnection(key int64, tConn transport.Conn) *connection {
 	c.connsMux.Lock()
 	defer c.connsMux.Unlock()
 
 	if v, ok := c.conns[key]; ok {
+		v.mux.Lock()
+		v.Conn = tConn
+		v.mux.Unlock()
 		return v
 	}
 
