@@ -89,6 +89,9 @@ type Client struct {
 
 	// MTProto options.
 	opts mtproto.Options // immutable
+	// primarySession is MTProto session state shared by successive primary
+	// connections, see createPrimaryConn.
+	primarySession *mtproto.SessionState // immutable
 	// dataConnPFS enables PFS for data connections only, see
 	// Options.EnablePFSForDataConns.
 	dataConnPFS bool // immutable
@@ -252,6 +255,7 @@ func NewClient(appID int, appHash string, opt Options) *Client {
 		Tracer: client.tracer,
 	}
 	client.dataConnPFS = opt.EnablePFSForDataConns && !opt.EnablePFS
+	client.primarySession = mtproto.NewSessionState()
 	client.conn = client.createPrimaryConn(nil)
 
 	return client

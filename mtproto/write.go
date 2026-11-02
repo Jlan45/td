@@ -85,20 +85,9 @@ func peekID(message bin.Encoder) uint32 {
 }
 
 func (c *Conn) nextMsgSeq(content bool) (msgID int64, seqNo int32) {
-	c.reqMux.Lock()
-	defer c.reqMux.Unlock()
-
-	msgID = c.newMessageID()
-
 	// Computing current sequence number (seqno).
 	// This should be serialized with new message id generation.
 	//
 	// See https://github.com/gotd/td/issues/245 for reference.
-	seqNo = c.sentContentMessages * 2
-	if content {
-		seqNo++
-		c.sentContentMessages++
-	}
-
-	return
+	return c.state().next(c.messageID.New, content)
 }

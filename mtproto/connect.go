@@ -63,6 +63,17 @@ func (c *Conn) connect(ctx context.Context) (rErr error) {
 	}
 
 	c.log.Info(ctx, "Key already exists")
+	if id, ok := c.state().resume(session.Key); ok {
+		// Moving the existing session to the new TCP connection, as official
+		// clients do on reconnect: a new session_id here would be a second main
+		// session on the same authorization (AUTH_KEY_DUPLICATED).
+		c.sessionMux.Lock()
+		c.sessionID = id
+		c.sessionMux.Unlock()
+		c.sessionResumed = true
+		c.log.Info(ctx, "Session resumed", log.Int64("session_id", id))
+		return nil
+	}
 	if session.ID == 0 {
 		// NB: Telegram can return 404 error if session id is zero.
 		//
@@ -72,6 +83,7 @@ func (c *Conn) connect(ctx context.Context) (rErr error) {
 			return err
 		}
 	}
+	c.state().start(session.Key, c.session().ID)
 
 	return nil
 }
@@ -152,6 +164,7 @@ func (c *Conn) createAuthKey(ctx context.Context) error {
 	c.sessionID = r.SessionID
 	c.salt = r.ServerSalt
 	c.sessionMux.Unlock()
+	c.state().start(r.AuthKey, r.SessionID)
 
 	return nil
 }
@@ -197,6 +210,8 @@ func (c *Conn) createTempAuthKey(ctx context.Context) error {
 	c.salt = r.ServerSalt
 	c.tempKeyExpiry = expiresAt
 	c.sessionMux.Unlock()
+	// Temporary key is generated per connection, so is the session.
+	c.state().start(r.AuthKey, r.SessionID)
 
 	return nil
 }

@@ -58,7 +58,7 @@ const (
 func newDataConnPFSTestClient(t *testing.T) (*Client, *connCapture, crypto.AuthKey) {
 	t.Helper()
 
-	c := &Client{log: log.For(log.Nop)}
+	c := &Client{log: log.For(log.Nop), primarySession: mtproto.NewSessionState()}
 	c.init()
 	c.ctx, c.cancel = context.WithCancel(context.Background())
 	t.Cleanup(c.cancel)

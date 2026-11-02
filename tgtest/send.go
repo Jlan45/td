@@ -49,7 +49,7 @@ func (s *Server) Send(ctx context.Context, k Session, t proto.MessageType, messa
 	ctx, cancel := context.WithTimeout(ctx, s.writeTimeout)
 	defer cancel()
 
-	if err := conn.Send(ctx, &b); err != nil {
+	if err := conn.current().Send(ctx, &b); err != nil {
 		return errors.Wrap(err, "send")
 	}
 

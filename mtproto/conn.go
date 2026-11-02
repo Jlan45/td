@@ -82,10 +82,17 @@ type Conn struct {
 	// server salts fetched by getSalts.
 	salts salts.Salts
 
-	// sentContentMessages is count of created content messages, used to
-	// compute sequence number within session.
-	sentContentMessages int32
-	reqMux              sync.Mutex
+	// sessState holds session id and msg_seqno counter. It may be shared with
+	// previous connections of the same client session (see SessionState).
+	// Use state() to access.
+	sessState *SessionState
+	stateOnce sync.Once
+	// sessionResumed is set by connect when the session of a previous
+	// connection was resumed instead of starting a new one.
+	sessionResumed bool
+	// sessionResetCh requests connection restart with a new session, see
+	// requestSessionReset.
+	sessionResetCh chan struct{}
 
 	// ackSendChan is queue for outgoing message id's that require waiting for
 	// ack from server.
@@ -169,6 +176,9 @@ func New(dialer Dialer, opt Options) *Conn {
 
 		gotSession: tdsync.NewReady(),
 
+		sessState:      opt.Session,
+		sessionResetCh: make(chan struct{}, 1),
+
 		rpc:               opt.engine,
 		compressThreshold: opt.CompressThreshold,
 		dialTimeout:       opt.DialTimeout,
@@ -233,6 +243,17 @@ func (c *Conn) Run(ctx context.Context, f func(ctx context.Context) error) error
 	if err := c.connect(ctx); err != nil {
 		return errors.Wrap(err, "start")
 	}
+	if c.sessionResumed {
+		// The server sends new_session_created only for sessions it does not
+		// know. A resumed session is already established, so report it the same
+		// way to the handler and unblock the salt loop.
+		if c.gotSession != nil {
+			c.gotSession.Signal()
+		}
+		if err := c.handler.OnSession(c.session()); err != nil {
+			c.log.Warn(ctx, "Resumed session handler failed", log.Error(err))
+		}
+	}
 	{
 		// All goroutines are bound to current call.
 		g := tdsync.NewLogGroup(ctx, c.log.Named("group").Logger())
@@ -259,6 +280,7 @@ func (c *Conn) Run(ctx context.Context, f func(ctx context.Context) error) error
 			// Renewal loop requests reconnect before temp key expiry.
 			g.Go("tempKeyRenewal", c.tempKeyRenewalLoop)
 		}
+		g.Go("sessionReset", c.sessionResetLoop)
 		g.Go("userCallback", f)
 
 		if err := g.Wait(); err != nil {

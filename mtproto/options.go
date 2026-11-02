@@ -89,6 +89,13 @@ type Options struct {
 	// Salt from server that can be used to restore previous connection.
 	Salt int64
 
+	// Session is MTProto session state shared by successive connections of one
+	// logical client session: a connection resumes the session started by a
+	// previous one with the same auth key instead of starting a new one. Must
+	// not be shared by connections that run concurrently.
+	// If nil, every connection starts a new session.
+	Session *SessionState
+
 	// EnablePFS enables Perfect Forward Secrecy using temporary auth keys.
 	EnablePFS bool
 	// TempKeyTTL is temporary auth key lifetime in seconds.

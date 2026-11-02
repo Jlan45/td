@@ -17,6 +17,8 @@ type badMessageError struct {
 const (
 	codeMessageIDTooLow     = 16
 	codeMessageIDTooHigh    = 17
+	codeMessageSeqNoTooLow  = 32
+	codeMessageSeqNoTooHigh = 33
 	codeIncorrectServerSalt = 48
 )
 
@@ -52,6 +54,11 @@ func (c *Conn) handleBadMsg(b *bin.Buffer) error {
 			return err
 		}
 
+		if bad.ErrorCode == codeMessageSeqNoTooLow || bad.ErrorCode == codeMessageSeqNoTooHigh {
+			// msg_id and msg_seqno are inconsistent within the session: it can
+			// not be continued (Telegram Desktop resetSession).
+			c.requestSessionReset(bad.ErrorCode)
+		}
 		c.rpc.NotifyError(bad.BadMsgID, &badMessageError{Code: bad.ErrorCode})
 		return nil
 	case mt.BadServerSaltTypeID:
