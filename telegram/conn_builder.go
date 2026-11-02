@@ -97,7 +97,20 @@ func (c *Client) createConn(
 	setup manager.SetupCallback,
 	onDead func(error),
 ) pool.Conn {
-	opts, s := c.session.Options(c.opts)
+	return c.createConnWith(c.opts, c.asHandler(), id, mode, setup, onDead)
+}
+
+// createConnWith creates connection to the primary DC using the given base
+// options and handler.
+func (c *Client) createConnWith(
+	base mtproto.Options,
+	handler manager.Handler,
+	id int64,
+	mode manager.ConnMode,
+	setup manager.SetupCallback,
+	onDead func(error),
+) pool.Conn {
+	opts, s := c.session.Options(base)
 	opts.Logger = c.log.Named("conn").With(
 		log.Int64("conn_id", id),
 		log.Int("dc_id", s.DC),
@@ -110,9 +123,42 @@ func (c *Client) createConn(
 			Test:    c.testDC,
 			Layer:   c.layer,
 			Device:  c.device,
-			Handler: c.asHandler(),
+			Handler: handler,
 			Setup:   setup,
 			OnDead:  onDead,
 		},
 	)
+}
+
+// dataConnOpts returns base options for data connections: PFS is enabled
+// when only data connections use it.
+func (c *Client) dataConnOpts() mtproto.Options {
+	opts := c.opts
+	if c.dataConnPFS {
+		opts.EnablePFS = true
+	}
+	return opts
+}
+
+// isPrimaryDataPFS reports whether a data connection to dcID runs under its own
+// temporary key on top of the primary permanent key, while the primary
+// connection uses that permanent key directly.
+func (c *Client) isPrimaryDataPFS(dcID int) bool {
+	return c.dataConnPFS && dcID == c.session.Load().DC
+}
+
+// primaryDataConnHandler handles PFS data connections to the primary DC when
+// only data connections use PFS. Their session carries the primary permanent
+// key together with a salt of the temporary key, so it must neither overwrite
+// the primary session nor be persisted.
+type primaryDataConnHandler struct {
+	clientHandler
+}
+
+func (primaryDataConnHandler) OnSession(tg.Config, mtproto.Session) error {
+	return nil
+}
+
+func (c *Client) asPrimaryDataConnHandler() manager.Handler {
+	return primaryDataConnHandler{clientHandler: clientHandler{client: c}}
 }

@@ -126,6 +126,18 @@ type Options struct {
 	// Default: 86400 (24h).
 	// The value is clamped in mtproto layer to keep protocol-safe bounds.
 	TempKeyTTL int
+	// EnablePFSForDataConns enables temporary auth keys only for data
+	// connections created by Pool, DC, MediaOnly and cross-DC invokes, while
+	// the primary connection keeps using the permanent key directly. Every
+	// data connection then talks to the server under its own temporary key
+	// instead of sharing the permanent key with the primary connection.
+	//
+	// The primary session is never written by these connections, and a temp
+	// key bind failure on them does not drop the primary permanent key: the
+	// primary connection remains the authority on it.
+	//
+	// No effect when EnablePFS is set. CDN connections never use PFS.
+	EnablePFSForDataConns bool
 
 	// CompressThreshold is a threshold in bytes to determine that message
 	// is large enough to be compressed using GZIP.
