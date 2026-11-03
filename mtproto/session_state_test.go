@@ -110,7 +110,7 @@ func TestSessionResetOnBadSeqNo(t *testing.T) {
 
 		var b bin.Buffer
 		a.NoError(b.Encode(&mt.BadMsgNotification{BadMsgID: 1, ErrorCode: code}))
-		a.NoError(first.handleBadMsg(&b))
+		a.NoError(first.handleBadMsg(1, &b))
 		a.Zero(state.ID())
 		a.ErrorIs(first.sessionResetLoop(context.Background()), ErrSessionReset)
 
@@ -133,7 +133,7 @@ func TestSessionKeptOnBadMsgID(t *testing.T) {
 
 	var b bin.Buffer
 	a.NoError(b.Encode(&mt.BadMsgNotification{BadMsgID: 1, ErrorCode: codeMessageIDTooLow}))
-	a.NoError(c.handleBadMsg(&b))
+	a.NoError(c.handleBadMsg(1, &b))
 	a.Equal(id, state.ID())
 	select {
 	case <-c.sessionResetCh:

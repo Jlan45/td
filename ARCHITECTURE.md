@@ -102,28 +102,54 @@ constructor and only deals in the `Conn` `Invoke` interface.
 
 ### Connection: `mtproto`
 
-[`mtproto`](mtproto) abstracts a **single** MTProto connection and manages its
-full life cycle (`conn.go`):
+[`mtproto`](mtproto) drives a **single** transport connection (`conn.go`) on
+top of an MTProto **session** that can outlive it (`session_state.go`):
 
 - Runs the [key exchange](exchange) on first connect to obtain the `auth_key`,
-  or reuses a stored one.
-- Maintains the server salt (`salt.go`, `salts/`), session, and message-id
-  generation (`message_id.go`).
-- Sends background pings with keepalive (`ping.go`) and reconnects on failure.
+  or reuses a stored one. A -404 for a stored key is reported as
+  `ErrAuthKeyNotFound` instead of regenerating the key in place.
+- Maintains the server salt (`salt.go`, `salts/`) and message-id generation
+  (`message_id.go`). Message ids follow server time: the clock difference is
+  measured from server msg_ids (`proto.ServerTime`, shared with
+  `proto.MessageIDGen`) and corrected on bad_msg 16/17.
+- Sends background pings (`ping.go`). Liveness is progress-aware by default:
+  any data received after a ping proves the connection alive
+  (`Options.PingStrictPong` restores the strict pong check).
 - (De)serializes, encrypts, and routes incoming messages to handlers
-  (`handle_*.go`, `read.go`, `write.go`), including containers, gzip, RPC
-  results, bad-msg notifications, future salts, and session-created events.
+  (`handle_*.go`, `read.go`, `write.go`), including containers (every inner
+  message is acknowledged and deduplicated), gzip, RPC results, bad-msg
+  notifications, future salts, message state and detailed info, and
+  session-created events.
+- Replay protection (`proto.MessageIDBuf`) distinguishes duplicates
+  (acknowledged and ignored) from messages older than the window (the session
+  is reset), like official clients.
 - Supports Perfect Forward Secrecy via temporary keys (`pfs.go`, `bind.go`).
 
-It is deliberately **single-connection**: reconnection across DCs, pooling, and
-update handling live in higher layers.
+**Session vs connection.** `Options.Session` (`SessionState`) holds the
+session_id, msg_seqno counter, received msg_ids and the requests of the
+session. Successive connections sharing it resume the same session instead of
+opening a new one per reconnect (a second session on the same key gets it
+revoked with `AUTH_KEY_DUPLICATED`). A new session starts only on a new auth
+key, bad_msg 32/33 or a too old message. Requests in flight when a connection
+closes are *orphans* (`session_requests.go`): an acknowledged one keeps
+waiting for the result the server sends to the resumed session; the state of
+a not acknowledged one is queried with `msgs_state_req` on the next
+connection and it is resent only if the server did not receive it.
+`Invoke` returns such requests as an error that `AwaitSession` waits on, so
+callers inside the connection callback never block reconnection. Without
+`Options.Session` every connection has its own session, as before.
+
+Reconnection across DCs, pooling, and update handling live in higher layers.
 
 ### RPC engine: `rpc`
 
-[`rpc`](rpc) is the request/response engine (`engine.go`). It matches RPC
-results to in-flight requests by message id, handles acknowledgements
-(`ack.go`), retransmits unacknowledged requests, and supports context-based
-cancellation. `mtproto.Conn` delegates request bookkeeping to it.
+[`rpc`](rpc) is the request/response engine (`engine.go`) of one connection.
+It matches RPC results to in-flight requests by message id, handles
+acknowledgements (`ack.go`), retransmits unacknowledged requests, and supports
+context-based cancellation. When the connection closes it reports whether the
+request was acknowledged (`ErrClosedAfterAck`) or not (`ErrEngineClosed`), so
+the session layer can decide whether the request may still complete or is
+safe to resend.
 
 ### Crypto: `crypto` and `exchange`
 
@@ -254,3 +280,8 @@ flows as follows:
 6. The response is read, decrypted, decoded, and routed back to the waiting
    caller; updates are dispatched to the `telegram/updates` manager and on to
    the user's `UpdateHandler`.
+7. If the primary connection breaks meanwhile, `telegram.Client.invokeConn`
+   waits on `mtproto.AwaitSession`: the request completes in the resumed
+   session, or is resent on the new connection only when the server did not
+   process it. A `new_session_created` for the updates connection injects
+   `updatesTooLong`, so lost updates are fetched with getDifference.

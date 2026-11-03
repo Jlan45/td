@@ -489,6 +489,7 @@ func TestEngineForceCloseAcked(t *testing.T) {
 		// transparent resend is not safe: plain cancellation is expected.
 		err := <-result
 		require.ErrorIs(t, err, context.Canceled)
+		require.ErrorIs(t, err, ErrClosedAfterAck)
 		require.NotErrorIs(t, err, ErrEngineClosed)
 		return nil
 	}

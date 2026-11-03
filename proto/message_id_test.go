@@ -113,9 +113,62 @@ func TestNewMessageIDBuf(t *testing.T) {
 	})
 }
 
+func TestMessageIDBufCheck(t *testing.T) {
+	t.Run("RemembersWholeWindow", func(t *testing.T) {
+		buf := NewMessageIDBuf(100)
+		for i := int64(1); i <= 100; i++ {
+			require.Equal(t, MessageIDAccepted, buf.Check(i*10))
+		}
+		for i := int64(1); i <= 100; i++ {
+			require.Equal(t, MessageIDDuplicate, buf.Check(i*10), "id %d", i*10)
+		}
+	})
+	t.Run("OutOfOrder", func(t *testing.T) {
+		buf := NewMessageIDBuf(4)
+		require.Equal(t, MessageIDAccepted, buf.Check(30))
+		require.Equal(t, MessageIDAccepted, buf.Check(10))
+		require.Equal(t, MessageIDAccepted, buf.Check(20))
+		require.Equal(t, MessageIDDuplicate, buf.Check(10))
+		require.Equal(t, MessageIDAccepted, buf.Check(40))
+		// Full: [10 20 30 40].
+		require.Equal(t, MessageIDTooOld, buf.Check(5))
+		require.Equal(t, MessageIDAccepted, buf.Check(25))
+		// 10 evicted: [20 25 30 40].
+		require.Equal(t, MessageIDTooOld, buf.Check(10))
+		require.Equal(t, MessageIDDuplicate, buf.Check(20))
+		require.Equal(t, MessageIDDuplicate, buf.Check(25))
+		require.Equal(t, MessageIDAccepted, buf.Check(50))
+		// 20 evicted: [25 30 40 50].
+		require.Equal(t, MessageIDTooOld, buf.Check(20))
+		require.Equal(t, MessageIDDuplicate, buf.Check(50))
+	})
+	t.Run("LowerAcceptedUntilFull", func(t *testing.T) {
+		buf := NewMessageIDBuf(3)
+		require.Equal(t, MessageIDAccepted, buf.Check(30))
+		require.Equal(t, MessageIDAccepted, buf.Check(10))
+		require.Equal(t, MessageIDAccepted, buf.Check(5))
+		require.Equal(t, MessageIDTooOld, buf.Check(1))
+	})
+	t.Run("NonPositive", func(t *testing.T) {
+		buf := NewMessageIDBuf(3)
+		require.Equal(t, MessageIDTooOld, buf.Check(0))
+		require.Equal(t, MessageIDTooOld, buf.Check(-1))
+	})
+}
+
+func TestMessageIDBufZeroAlloc(t *testing.T) {
+	buf := NewMessageIDBuf(400)
+	id := int64(1)
+	testutil.ZeroAlloc(t, func() {
+		id++
+		_ = buf.Check(id)
+	})
+}
+
 func BenchmarkMessageIDBuf(b *testing.B) {
-	buf := NewMessageIDBuf(100)
+	buf := NewMessageIDBuf(400)
+	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		buf.Consume(int64(i))
+		buf.Consume(int64(i + 1))
 	}
 }

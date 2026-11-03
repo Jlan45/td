@@ -27,7 +27,24 @@ var bufPool = bin.NewPool(0)
 // longer be issued.
 const slowWriteThreshold = 3 * time.Second
 
-func (c *Conn) write(ctx context.Context, msgID int64, seqNo int32, message bin.Encoder) error {
+// writeOne encrypts and sends a single message.
+func (c *Conn) writeOne(ctx context.Context, msgID int64, seqNo int32, message bin.Encoder) error {
+	return c.send(ctx, msgID, seqNo, message, nil)
+}
+
+// send encrypts and sends message. If raw is not nil, it is the encoded
+// message sent as is (without compression), message is used for logging only.
+func (c *Conn) send(
+	ctx context.Context,
+	msgID int64, seqNo int32,
+	message bin.Encoder,
+	raw *bin.Buffer,
+) error {
+	if c.sessionResetting.Load() {
+		// Session was dropped: continuing it would send messages with a new
+		// seqno counter under the old session_id.
+		return errWriteSessionReset
+	}
 	start := c.clock.Now()
 
 	// Grab shared lock for writing.
@@ -52,7 +69,11 @@ func (c *Conn) write(ctx context.Context, msgID int64, seqNo int32, message bin.
 	b := bufPool.Get()
 	defer bufPool.Put(b)
 
-	if err := c.newEncryptedMessage(msgID, seqNo, message, b); err != nil {
+	if raw != nil {
+		if err := c.encryptRaw(msgID, seqNo, raw, b); err != nil {
+			return err
+		}
+	} else if err := c.newEncryptedMessage(msgID, seqNo, message, b); err != nil {
 		return err
 	}
 

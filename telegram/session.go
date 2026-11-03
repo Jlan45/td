@@ -109,6 +109,11 @@ func (c *Client) onSession(cfg tg.Config, s mtproto.Session) error {
 		return nil
 	}
 
+	if !s.PermKey.Zero() && c.verifyPrimaryKey.Swap(false) {
+		// Temporary key was bound to the permanent one: the server knows it.
+		c.log.Info(context.Background(), "Primary auth key verified")
+	}
+
 	c.connMux.Lock()
 	c.session.Store(sessionData)
 	c.cfg.Store(cfg)

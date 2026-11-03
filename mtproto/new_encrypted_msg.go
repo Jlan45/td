@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/go-faster/errors"
+
 	"github.com/gotd/log"
 
 	"github.com/gotd/td/bin"
@@ -66,5 +67,39 @@ func (c *Conn) newEncryptedMessage(id int64, seq int32, payload bin.Encoder, b *
 		return errors.Wrap(err, "encrypt")
 	}
 
+	return nil
+}
+
+// encryptRaw encrypts already encoded message data.
+func (c *Conn) encryptRaw(id int64, seq int32, raw, b *bin.Buffer) error {
+	s := c.session()
+	if err := c.cipher.Encrypt(s.Key, crypto.EncryptedMessageData{
+		SessionID:              s.ID,
+		Salt:                   s.Salt,
+		MessageID:              id,
+		SeqNo:                  seq,
+		MessageDataLen:         int32(raw.Len()), //nolint:gosec // bounded by container size limit
+		MessageDataWithPadding: raw.Buf,
+	}, b); err != nil {
+		return errors.Wrap(err, "encrypt")
+	}
+	return nil
+}
+
+// encodePayload encodes message as it is sent: compressed with gzip_packed if
+// it is larger than compression threshold.
+func (c *Conn) encodePayload(payload bin.Encoder, b *bin.Buffer) error {
+	if c.compressThreshold <= 0 {
+		return payload.Encode(b)
+	}
+	payloadBuf := bufPool.Get()
+	defer bufPool.Put(payloadBuf)
+	if err := payload.Encode(payloadBuf); err != nil {
+		return errors.Wrap(err, "encode payload")
+	}
+	if payloadBuf.Len() > c.compressThreshold {
+		return proto.GZIP{Data: payloadBuf.Raw()}.Encode(b)
+	}
+	b.Put(payloadBuf.Raw())
 	return nil
 }

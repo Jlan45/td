@@ -446,3 +446,11 @@ func TestConnProgress(t *testing.T) {
 	c.conn = fc
 	require.Equal(t, uint64(11), c.progress())
 }
+
+// Progress-aware liveness is the default, PingStrictPong restores the
+// historical mode.
+func TestPingProgressAwareByDefault(t *testing.T) {
+	a := require.New(t)
+	a.True(New(nil, Options{Logger: log.Nop}).pingProgressAware)
+	a.False(New(nil, Options{Logger: log.Nop, PingStrictPong: true}).pingProgressAware)
+}

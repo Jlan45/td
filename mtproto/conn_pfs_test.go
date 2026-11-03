@@ -57,6 +57,21 @@ func TestHandleAuthKeyNotFoundPFS(t *testing.T) {
 	a.ErrorIs(err, ErrPFSReconnectRequired)
 }
 
+// Without PFS a -404 must not regenerate the permanent key in place: that
+// would silently replace the authorization of a key which may still be valid.
+func TestHandleAuthKeyNotFoundKeepsKey(t *testing.T) {
+	a := require.New(t)
+	key := crypto.Key{5}.WithID()
+	conn := New(nil, Options{
+		Key:    key,
+		Logger: log.Nop,
+	})
+
+	err := conn.handleAuthKeyNotFound(context.Background())
+	a.ErrorIs(err, ErrAuthKeyNotFound)
+	a.Equal(key, conn.session().Key, "key must not be regenerated")
+}
+
 func TestPermKeyOlderThan60s(t *testing.T) {
 	a := require.New(t)
 	now := time.Now().Unix()

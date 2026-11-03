@@ -5,13 +5,15 @@ import (
 	"encoding/binary"
 
 	"github.com/go-faster/errors"
-	"github.com/gotd/log"
 	"go.uber.org/multierr"
+
+	"github.com/gotd/log"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/crypto"
 	"github.com/gotd/td/mt"
 	"github.com/gotd/td/proto"
+	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 	"github.com/gotd/td/transport"
 )
@@ -39,7 +41,7 @@ func (s *Server) rpcHandle(ctx context.Context, c transport.Conn, b *bin.Buffer)
 	if conn := s.users.createConnection(msg.SessionID, c); !conn.sentCreated() {
 		s.log.Debug(ctx, "Send handleSessionCreated event", session.LogAttr())
 		salt := int64(binary.LittleEndian.Uint64(key.ID[:]))
-		if err := s.sendSessionCreated(ctx, session, salt); err != nil {
+		if err := s.sendSessionCreated(ctx, session, msg.MessageID, salt); err != nil {
 			return err
 		}
 	}
@@ -73,8 +75,31 @@ func (s *Server) handle(req *Request) error {
 		log.String("type", s.types.Get(id)),
 	)
 
+	conn, hasConn := s.users.getConnection(req.Session.ID)
+	if hasConn {
+		conn.markSeen(req.MsgID)
+	}
+
 	// TODO(tdakkota): unpack all containers
 	switch id {
+	case mt.MsgsStateReqTypeID:
+		var stateReq mt.MsgsStateReq
+		if err := stateReq.Decode(in); err != nil {
+			return err
+		}
+		// 4: message received, 2: message not received.
+		info := make([]byte, len(stateReq.MsgIDs))
+		for i, msgID := range stateReq.MsgIDs {
+			info[i] = 2
+			if hasConn && conn.isSeen(msgID) {
+				info[i] = 4
+			}
+		}
+		return s.Send(req.RequestCtx, req.Session, proto.MessageServerResponse, &mt.MsgsStateInfo{
+			ReqMsgID: req.MsgID,
+			Info:     info,
+		})
+
 	case mt.PingDelayDisconnectRequestTypeID:
 		pingReq := mt.PingDelayDisconnectRequest{}
 		if err := pingReq.Decode(in); err != nil {
@@ -97,6 +122,20 @@ func (s *Server) handle(req *Request) error {
 		}
 
 		return s.SendEternalSalt(req)
+
+	case tg.AuthBindTempAuthKeyRequestTypeID:
+		var bind tg.AuthBindTempAuthKeyRequest
+		if err := bind.Decode(in); err != nil {
+			return err
+		}
+		// The server can decrypt bind message only with a permanent key it
+		// knows, otherwise it reports ENCRYPTED_MESSAGE_INVALID.
+		var perm crypto.AuthKey
+		perm.SetIntID(bind.PermAuthKeyID)
+		if _, ok := s.users.getSession(perm.ID); !ok {
+			return s.SendErr(req, tgerr.New(400, tg.ErrEncryptedMessageInvalid))
+		}
+		return s.SendBool(req, true)
 
 	case mt.RPCDropAnswerRequestTypeID:
 		drop := mt.RPCDropAnswerRequest{}

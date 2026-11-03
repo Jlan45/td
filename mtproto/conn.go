@@ -7,8 +7,9 @@ import (
 	"time"
 
 	"github.com/go-faster/errors"
-	"github.com/gotd/log"
 	"go.uber.org/atomic"
+
+	"github.com/gotd/log"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/clock"
@@ -26,6 +27,14 @@ import (
 type Handler interface {
 	OnMessage(b *bin.Buffer) error
 	OnSession(session Session) error
+}
+
+// SessionCreatedHandler is optional Handler extension notified when server
+// created a new session (new_session_created). Updates sent to the previous
+// session may have been lost, so update state should be refreshed with
+// getDifference, like TDLib does for the main session.
+type SessionCreatedHandler interface {
+	OnSessionCreated()
 }
 
 // MessageIDSource is message id generator.
@@ -60,11 +69,15 @@ type Conn struct {
 
 	// Wrappers for external world, like current time, logs or PRNG.
 	// Should be immutable.
-	clock        clock.Clock
-	rand         io.Reader
-	cipher       Cipher
-	log          log.Helper
-	messageID    MessageIDSource
+	clock     clock.Clock
+	rand      io.Reader
+	cipher    Cipher
+	log       log.Helper
+	messageID MessageIDSource
+	// serverTime tracks server clock difference. It is shared with messageID
+	// if the source supports it (proto.MessageIDGen), so generated ids follow
+	// server time.
+	serverTime   *proto.ServerTime
 	messageIDBuf MessageBuf // replay attack protection
 
 	// use session() to access authKey, salt or sessionID.
@@ -87,12 +100,23 @@ type Conn struct {
 	// Use state() to access.
 	sessState *SessionState
 	stateOnce sync.Once
+	// writes packs concurrent writes into containers, see write_batch.go.
+	writes writeQueue
+	// disableContainers disables packing, see Options.DisableContainers.
+	disableContainers bool
+	// sharedSession is set when session state is provided by caller
+	// (Options.Session), so requests outlive the connection, see
+	// session_requests.go.
+	sharedSession bool
 	// sessionResumed is set by connect when the session of a previous
 	// connection was resumed instead of starting a new one.
 	sessionResumed bool
 	// sessionResetCh requests connection restart with a new session, see
 	// requestSessionReset.
 	sessionResetCh chan struct{}
+	// sessionResetting is set by requestSessionReset: the session is dropped
+	// and the connection must not be used anymore.
+	sessionResetting atomic.Bool
 
 	// ackSendChan is queue for outgoing message id's that require waiting for
 	// ack from server.
@@ -108,7 +132,7 @@ type Conn struct {
 	pingTimeout time.Duration
 	// pingInterval is duration between ping_delay_disconnect request.
 	pingInterval time.Duration
-	// pingProgressAware selects progress-aware liveness. See Options.PingProgressAware.
+	// pingProgressAware selects progress-aware liveness. See Options.PingStrictPong.
 	pingProgressAware bool
 	// pingMaxWait bounds an unanswered ping while data keeps arriving.
 	// Zero disables the bound.
@@ -153,7 +177,8 @@ func New(dialer Dialer, opt Options) *Conn {
 		cipher:       opt.Cipher,
 		log:          log.For(opt.Logger),
 		messageID:    opt.MessageID,
-		messageIDBuf: proto.NewMessageIDBuf(100),
+		serverTime:   serverTimeOf(opt.MessageID),
+		messageIDBuf: proto.NewMessageIDBuf(receivedBufSize),
 
 		ackSendChan:  make(chan int64),
 		ackInterval:  opt.AckInterval,
@@ -171,13 +196,16 @@ func New(dialer Dialer, opt Options) *Conn {
 		pingTimeout:  opt.PingTimeout,
 		pingInterval: opt.PingInterval,
 
-		pingProgressAware: opt.PingProgressAware,
+		pingProgressAware: !opt.PingStrictPong,
 		pingMaxWait:       opt.PingMaxWait,
 
 		gotSession: tdsync.NewReady(),
 
-		sessState:      opt.Session,
-		sessionResetCh: make(chan struct{}, 1),
+		sessState:     opt.Session,
+		sharedSession: opt.Session != nil,
+
+		disableContainers: opt.DisableContainers,
+		sessionResetCh:    make(chan struct{}, 1),
 
 		rpc:               opt.engine,
 		compressThreshold: opt.CompressThreshold,
@@ -281,6 +309,9 @@ func (c *Conn) Run(ctx context.Context, f func(ctx context.Context) error) error
 			g.Go("tempKeyRenewal", c.tempKeyRenewalLoop)
 		}
 		g.Go("sessionReset", c.sessionResetLoop)
+		if c.sharedSession {
+			g.Go("stateQuery", c.stateQueryLoop)
+		}
 		g.Go("userCallback", f)
 
 		if err := g.Wait(); err != nil {

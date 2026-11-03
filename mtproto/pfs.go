@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/go-faster/errors"
+
 	"github.com/gotd/log"
 )
 
@@ -15,6 +16,15 @@ var (
 	// ErrPFSDropKeysRequired is returned when stored permanent key should be
 	// dropped and generated again on the next connection attempt.
 	ErrPFSDropKeysRequired = errors.New("pfs drop keys required")
+	// ErrAuthKeyNotFound is returned when server reported (transport error
+	// -404) that it does not know the permanent auth key used without PFS.
+	//
+	// The key is not regenerated in place: -404 does not prove that the key is
+	// invalid, and regenerating it would silently replace the authorization.
+	// Like TDLib ("Use PFS to check main key"), caller should verify the key
+	// by binding a temporary key to it (EnablePFS) on the next connection: the
+	// bind fails with ErrPFSDropKeysRequired only if the key is really gone.
+	ErrAuthKeyNotFound = errors.New("auth key not found")
 )
 
 func (c *Conn) tempKeyRenewalLoop(ctx context.Context) error {

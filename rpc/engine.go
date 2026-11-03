@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/go-faster/errors"
+
 	"github.com/gotd/log"
 
 	"github.com/gotd/td/bin"
@@ -187,7 +188,7 @@ func (e *Engine) Do(ctx context.Context, req Request) error {
 		// so resending is not safe. Report plain context error, callers
 		// should not retry transparently.
 		logger.Debug(ctx, "Engine closed while waiting for result")
-		return errors.Wrap(e.reqCtx.Err(), "engine forcibly closed")
+		return errors.Wrap(ErrClosedAfterAck, "engine forcibly closed")
 	case <-done:
 		logger.Debug(ctx, "Result received", log.Error(resultErr))
 		return resultErr
@@ -263,6 +264,25 @@ func (e *Engine) retryUntilAck(ctx context.Context, req Request) (sent bool, err
 	}
 
 	return true, loop()
+}
+
+// Pending reports whether engine waits for result of request with msgID.
+func (e *Engine) Pending(msgID int64) bool {
+	e.mux.Lock()
+	defer e.mux.Unlock()
+	_, ok := e.rpc[msgID]
+	return ok
+}
+
+// PendingIDs returns message ids of requests waiting for result.
+func (e *Engine) PendingIDs() []int64 {
+	e.mux.Lock()
+	defer e.mux.Unlock()
+	ids := make([]int64, 0, len(e.rpc))
+	for id := range e.rpc {
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 // NotifyResult notifies engine about received RPC response.

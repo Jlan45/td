@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/go-faster/errors"
+
 	"github.com/gotd/log"
 
 	"github.com/gotd/td/bin"
@@ -18,6 +19,9 @@ func (c *Conn) handleAck(b *bin.Buffer) error {
 
 	c.log.Debug(context.Background(), "Received ack", log.Any("msg_ids", ack.MsgIDs))
 	c.rpc.NotifyAcks(ack.MsgIDs)
+	if c.sharedSession {
+		c.state().ack(ack.MsgIDs)
+	}
 
 	return nil
 }

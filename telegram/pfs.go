@@ -12,6 +12,10 @@ import (
 )
 
 func (c *Client) handlePrimaryConnDead(err error) {
+	if errors.Is(err, mtproto.ErrAuthKeyNotFound) {
+		c.requestPrimaryKeyVerification()
+		return
+	}
 	if !errors.Is(err, mtproto.ErrPFSDropKeysRequired) {
 		return
 	}
@@ -30,8 +34,34 @@ func (c *Client) handlePrimaryConnDead(err error) {
 	c.sessionsMux.Unlock()
 }
 
+// requestPrimaryKeyVerification makes the next primary connection verify the
+// permanent key after the server reported -404 for it.
+//
+// Like TDLib ("Use PFS to check main key"), the key is checked by binding a
+// temporary key to it: if the key is valid, the -404 was spurious and the key
+// is kept; otherwise the bind fails with mtproto.ErrPFSDropKeysRequired and
+// the key is dropped by handlePrimaryConnDead.
+func (c *Client) requestPrimaryKeyVerification() {
+	if c.verifyPrimaryKey.Swap(true) {
+		return
+	}
+	c.log.Warn(context.Background(), "Server does not know primary auth key, verifying it on next connection",
+		log.Int("dc_id", c.session.Load().DC),
+	)
+}
+
+// dropKeyRequired reports whether error means that DC auth key must be dropped
+// and generated again.
+//
+// For non-primary DCs a -404 is enough: their key can be re-created and
+// authorized again via auth.exportAuthorization without logging out (TDLib
+// can_drop_main_auth_key_without_logging_out).
+func dropKeyRequired(err error) bool {
+	return errors.Is(err, mtproto.ErrPFSDropKeysRequired) || errors.Is(err, mtproto.ErrAuthKeyNotFound)
+}
+
 func (c *Client) handleDCConnDead(dcID int, err error) {
-	if !errors.Is(err, mtproto.ErrPFSDropKeysRequired) {
+	if !dropKeyRequired(err) {
 		// Preserve old error path for non-PFS failures.
 		if c.onDead != nil {
 			c.onDead(err)

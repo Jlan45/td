@@ -1,9 +1,12 @@
 package mtproto
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/go-faster/errors"
+
+	"github.com/gotd/log"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/mt"
@@ -20,6 +23,7 @@ const (
 	codeMessageSeqNoTooLow  = 32
 	codeMessageSeqNoTooHigh = 33
 	codeIncorrectServerSalt = 48
+	codeInvalidContainer    = 64
 )
 
 func (c badMessageError) Error() string {
@@ -42,7 +46,24 @@ func (c badMessageError) Error() string {
 	return description
 }
 
-func (c *Conn) handleBadMsg(b *bin.Buffer) error {
+// notifyBadMsg reports rejected message to its request. A rejected container
+// rejects all of its messages (Telegram Desktop resends them).
+func (c *Conn) notifyBadMsg(badMsgID int64, bad *badMessageError) {
+	ids := c.containerMessages(badMsgID)
+	if ids == nil {
+		ids = []int64{badMsgID}
+	}
+	for _, id := range ids {
+		if c.orphanRequest(id) && c.state().notProcessed(id) {
+			// Orphan request was rejected without processing, its caller
+			// resends it.
+			continue
+		}
+		c.rpc.NotifyError(id, bad)
+	}
+}
+
+func (c *Conn) handleBadMsg(msgID int64, b *bin.Buffer) error {
 	id, err := b.PeekID()
 	if err != nil {
 		return err
@@ -54,12 +75,24 @@ func (c *Conn) handleBadMsg(b *bin.Buffer) error {
 			return err
 		}
 
+		if bad.ErrorCode == codeMessageIDTooHigh {
+			// Our clock is ahead of server one: server time can not be
+			// trusted to only grow anymore (TDLib reset_server_time_difference).
+			// Too low msg_id is corrected by Observe on this message itself.
+			c.serverTime.Reset(msgID, c.clock.Now())
+		}
+		if bad.ErrorCode == codeMessageIDTooLow || bad.ErrorCode == codeMessageIDTooHigh {
+			c.log.Warn(context.Background(), "Bad msg_id time, server time corrected",
+				log.Int("code", bad.ErrorCode),
+				log.Duration("server_time_offset", c.serverTime.Offset()),
+			)
+		}
 		if bad.ErrorCode == codeMessageSeqNoTooLow || bad.ErrorCode == codeMessageSeqNoTooHigh {
 			// msg_id and msg_seqno are inconsistent within the session: it can
 			// not be continued (Telegram Desktop resetSession).
-			c.requestSessionReset(bad.ErrorCode)
+			c.requestSessionReset(sessionResetBadSeqNo)
 		}
-		c.rpc.NotifyError(bad.BadMsgID, &badMessageError{Code: bad.ErrorCode})
+		c.notifyBadMsg(bad.BadMsgID, &badMessageError{Code: bad.ErrorCode})
 		return nil
 	case mt.BadServerSaltTypeID:
 		var bad mt.BadServerSalt
@@ -67,7 +100,10 @@ func (c *Conn) handleBadMsg(b *bin.Buffer) error {
 			return err
 		}
 
-		c.rpc.NotifyError(bad.BadMsgID, &badMessageError{Code: bad.ErrorCode, NewSalt: bad.NewServerSalt})
+		// Salt is applied before resending any rejected request.
+		c.storeSalt(bad.NewServerSalt)
+		c.salts.Reset()
+		c.notifyBadMsg(bad.BadMsgID, &badMessageError{Code: bad.ErrorCode, NewSalt: bad.NewServerSalt})
 		return nil
 	default:
 		return errors.Errorf("unknown type id 0x%d", id)

@@ -8,6 +8,7 @@ import (
 
 	"github.com/cenkalti/backoff/v4"
 	"github.com/go-faster/errors"
+
 	"github.com/gotd/log"
 
 	"github.com/gotd/td/bin"
@@ -105,6 +106,19 @@ func (c *Conn) OnSession(session mtproto.Session) error {
 		return nil
 	}
 	return c.flushPendingSession()
+}
+
+// OnSessionCreated implements mtproto.SessionCreatedHandler.
+//
+// Only the updates connection forwards it: updates are delivered to that
+// session, like TDLib does for the main session only.
+func (c *Conn) OnSessionCreated() {
+	if c.mode != ConnModeUpdates {
+		return
+	}
+	if h, ok := c.handler.(mtproto.SessionCreatedHandler); ok {
+		h.OnSessionCreated()
+	}
 }
 
 func (c *Conn) configReady() bool {

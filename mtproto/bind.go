@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/go-faster/errors"
+
 	"github.com/gotd/log"
 
 	"github.com/gotd/td/crypto"
@@ -27,6 +28,12 @@ func (c *Conn) bindTempAuthKey(ctx context.Context) error {
 			if err := c.handleBindEncryptedMessageInvalid(attempt); err != nil {
 				return err
 			}
+			continue
+		}
+		var badMsgErr *badMessageError
+		if errors.As(err, &badMsgErr) && (badMsgErr.Code == codeMessageIDTooLow || badMsgErr.Code == codeMessageIDTooHigh) {
+			// Server time was corrected by handleBadMsg, next attempt uses a
+			// new msg_id.
 			continue
 		}
 		if tgerr.Is(err, "CONNECTION_NOT_INITED") {

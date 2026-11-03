@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/go-faster/errors"
+
 	"github.com/gotd/log"
 
 	"github.com/gotd/td/bin"
@@ -23,7 +24,7 @@ func (c *Conn) handleMessage(msgID int64, b *bin.Buffer) error {
 	case mt.NewSessionCreatedTypeID:
 		return c.handleSessionCreated(b)
 	case mt.BadMsgNotificationTypeID, mt.BadServerSaltTypeID:
-		return c.handleBadMsg(b)
+		return c.handleBadMsg(msgID, b)
 	case mt.FutureSaltsTypeID:
 		return c.handleFutureSalts(b)
 	case proto.MessageContainerTypeID:
@@ -36,9 +37,10 @@ func (c *Conn) handleMessage(msgID int64, b *bin.Buffer) error {
 		return c.handleAck(b)
 	case proto.GZIPTypeID:
 		return c.handleGZIP(msgID, b)
-	case mt.MsgDetailedInfoTypeID,
-		mt.MsgNewDetailedInfoTypeID:
-		return nil
+	case mt.MsgDetailedInfoTypeID, mt.MsgNewDetailedInfoTypeID:
+		return c.handleDetailedInfo(b)
+	case mt.MsgsStateInfoTypeID:
+		return c.handleStateInfo(b)
 	default:
 		return c.handler.OnMessage(b)
 	}
