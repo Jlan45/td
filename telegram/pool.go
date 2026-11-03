@@ -95,7 +95,14 @@ func (c *Client) dc(
 	)
 
 	opts := c.dataConnOpts()
-	primaryDataPFS := mode != manager.ConnModeCDN && c.isPrimaryDataPFS(dcID)
+	// Data connections to the primary DC are additional sessions over the
+	// primary authorization key: they must use that key (c.session), not the
+	// per-DC map which is empty until the primary connection reports its
+	// session, and they must never write the primary session.
+	toPrimary := mode != manager.ConnModeCDN && dcID == c.session.Load().DC
+	if toPrimary && c.session.Load().AuthKey.Zero() {
+		return nil, errors.Errorf("primary DC %d has no authorization key yet", dcID)
+	}
 	if mode == manager.ConnModeCDN {
 		// CDN datacenters reject auth.bindTempAuthKey with CDN_METHOD_INVALID:
 		// a CDN connection must authenticate with a permanent key only, without
@@ -128,18 +135,24 @@ func (c *Client) dc(
 	p, err := c.createPool(dcID, max, func() pool.Conn {
 		id := c.connsCounter.Inc()
 
-		c.sessionsMux.Lock()
-		sessions := c.sessions
-		if mode == manager.ConnModeCDN {
-			// Keep CDN auth key lifecycle separated from regular DC sessions.
-			sessions = c.cdnSessions
+		var session *pool.SyncSession
+		if toPrimary {
+			session = c.session
+		} else {
+			c.sessionsMux.Lock()
+			sessions := c.sessions
+			if mode == manager.ConnModeCDN {
+				// Keep CDN auth key lifecycle separated from regular DC sessions.
+				sessions = c.cdnSessions
+			}
+			var ok bool
+			session, ok = sessions[dcID]
+			if !ok {
+				session = pool.NewSyncSession(pool.Session{DC: dcID})
+				sessions[dcID] = session
+			}
+			c.sessionsMux.Unlock()
 		}
-		session, ok := sessions[dcID]
-		if !ok {
-			session = pool.NewSyncSession(pool.Session{DC: dcID})
-			sessions[dcID] = session
-		}
-		c.sessionsMux.Unlock()
 
 		options, data := session.Options(opts)
 		setup := manager.SetupCallback(nil)
@@ -156,7 +169,9 @@ func (c *Client) dc(
 			// CDN pools do not process updates and use dedicated session store.
 			handler = c.asCDNHandler()
 		}
-		if primaryDataPFS {
+		if toPrimary {
+			// Session of an additional connection must not overwrite or
+			// persist the primary session.
 			handler = c.asPrimaryDataConnHandler()
 		}
 		options.Logger = c.log.Named("conn").With(
@@ -177,9 +192,12 @@ func (c *Client) dc(
 						c.handleCDNConnDead(dcID, err)
 						return
 					}
-					if primaryDataPFS {
+					if toPrimary {
 						// Same as Pool: the permanent key belongs to the
 						// primary connection and is not dropped from here.
+						if errors.Is(err, mtproto.ErrAuthKeyNotFound) {
+							c.requestPrimaryKeyVerification()
+						}
 						if c.onDead != nil {
 							c.onDead(err)
 						}
@@ -199,7 +217,7 @@ func (c *Client) dc(
 		// require auth.export/import bootstrap.
 		return p, nil
 	}
-	if dcID == c.session.Load().DC {
+	if toPrimary {
 		// The primary key is already authorized: a data session to the primary
 		// DC is just another session_id over it and needs no re-authorization,
 		// while exporting authorization to the current DC is invalid.

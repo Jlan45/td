@@ -13,6 +13,27 @@ type connection struct {
 	mux sync.Mutex
 	transport.Conn
 	sent atomic.Bool
+	// seen stores msg_id of client messages received in the session, used to
+	// answer msgs_state_req.
+	seen map[int64]struct{}
+}
+
+// markSeen records client message of the session.
+func (conn *connection) markSeen(msgID int64) {
+	conn.mux.Lock()
+	defer conn.mux.Unlock()
+	if conn.seen == nil {
+		conn.seen = map[int64]struct{}{}
+	}
+	conn.seen[msgID] = struct{}{}
+}
+
+// isSeen reports whether client message was received in the session.
+func (conn *connection) isSeen(msgID int64) bool {
+	conn.mux.Lock()
+	defer conn.mux.Unlock()
+	_, ok := conn.seen[msgID]
+	return ok
 }
 
 func (conn *connection) sentCreated() bool {

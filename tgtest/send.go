@@ -113,9 +113,12 @@ func (s *Server) SendVector(req *Request, msgs ...bin.Encoder) error {
 }
 
 // sendSessionCreated sends mt.NewSessionCreated `new_session_created` notification.
-func (s *Server) sendSessionCreated(ctx context.Context, k Session, serverSalt int64) error {
+// sendSessionCreated sends new_session_created, firstMsgID is msg_id of the
+// first client message of the session, like Telegram servers do: client
+// resends messages sent before it.
+func (s *Server) sendSessionCreated(ctx context.Context, k Session, firstMsgID, serverSalt int64) error {
 	if err := s.Send(ctx, k, proto.MessageFromServer, &mt.NewSessionCreated{
-		FirstMsgID: s.msgID.New(proto.MessageFromClient),
+		FirstMsgID: firstMsgID,
 		ServerSalt: serverSalt,
 	}); err != nil {
 		return errors.Wrap(err, "send sessionCreated")

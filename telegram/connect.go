@@ -169,6 +169,11 @@ func (c *Client) Run(ctx context.Context, f func(ctx context.Context) error) (er
 	// Setting up client context for background operations like updates
 	// handling or pool creation.
 	c.ctx, c.cancel = context.WithCancel(ctx)
+	if c.primarySession != nil {
+		// The session can not be resumed after the client is closed: requests
+		// waiting for it must fail.
+		defer c.primarySession.Close()
+	}
 
 	c.log.Info(ctx, "Starting")
 	defer c.log.Info(context.Background(), "Closed")

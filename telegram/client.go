@@ -95,6 +95,9 @@ type Client struct {
 	// dataConnPFS enables PFS for data connections only, see
 	// Options.EnablePFSForDataConns.
 	dataConnPFS bool // immutable
+	// verifyPrimaryKey makes the next primary connection verify the permanent
+	// key with PFS bind, see requestPrimaryKeyVerification.
+	verifyPrimaryKey atomic.Bool
 
 	// DCList state.
 	// Domain list (for websocket)
@@ -243,7 +246,8 @@ func NewClient(appID int, appHash string, opt Options) *Client {
 		DialTimeout:       opt.DialTimeout,
 		PingInterval:      opt.PingInterval,
 		PingTimeout:       opt.PingTimeout,
-		PingProgressAware: opt.PingProgressAware,
+		PingStrictPong:    opt.PingStrictPong,
+		DisableContainers: opt.DisableContainers,
 		PingMaxWait:       opt.PingMaxWait,
 		// Forward PFS toggles into low-level mtproto connection.
 		EnablePFS:  opt.EnablePFS,

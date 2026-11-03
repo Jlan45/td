@@ -22,6 +22,11 @@ func (c clientHandler) OnSession(cfg tg.Config, s mtproto.Session) error {
 	return c.client.onSession(cfg, s)
 }
 
+// OnSessionCreated implements mtproto.SessionCreatedHandler.
+func (c clientHandler) OnSessionCreated() {
+	c.client.onSessionCreated()
+}
+
 func (c clientHandler) OnMessage(b *bin.Buffer) error {
 	return c.client.handleUpdates(b)
 }
@@ -95,6 +100,11 @@ func (c *Client) primaryDC(dc int) mtproto.Dialer {
 func (c *Client) createPrimaryConn(setup manager.SetupCallback) pool.Conn {
 	opts := c.opts
 	opts.Session = c.primarySession
+	if c.verifyPrimaryKey.Load() {
+		// Bind a temporary key to the permanent one to check that the server
+		// still knows it, see requestPrimaryKeyVerification.
+		opts.EnablePFS = true
+	}
 	return c.createConnWith(opts, c.asHandler(), 0, c.defaultMode, setup, c.onDead)
 }
 
@@ -147,17 +157,10 @@ func (c *Client) dataConnOpts() mtproto.Options {
 	return opts
 }
 
-// isPrimaryDataPFS reports whether a data connection to dcID runs under its own
-// temporary key on top of the primary permanent key, while the primary
-// connection uses that permanent key directly.
-func (c *Client) isPrimaryDataPFS(dcID int) bool {
-	return c.dataConnPFS && dcID == c.session.Load().DC
-}
-
-// primaryDataConnHandler handles PFS data connections to the primary DC when
-// only data connections use PFS. Their session carries the primary permanent
-// key together with a salt of the temporary key, so it must neither overwrite
-// the primary session nor be persisted.
+// primaryDataConnHandler handles additional data connections to the primary
+// DC. They are separate sessions over the primary authorization key (with a
+// temporary key of their own when only data connections use PFS), so their
+// session must neither overwrite the primary session nor be persisted.
 type primaryDataConnHandler struct {
 	clientHandler
 }

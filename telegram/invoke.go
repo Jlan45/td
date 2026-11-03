@@ -12,6 +12,7 @@ import (
 	"github.com/gotd/log"
 
 	"github.com/gotd/td/bin"
+	"github.com/gotd/td/mtproto"
 	"github.com/gotd/td/pool"
 	"github.com/gotd/td/rpc"
 	"github.com/gotd/td/tg"
@@ -98,6 +99,11 @@ func (c *Client) invokeConn(ctx context.Context, input bin.Encoder, output bin.D
 		c.connMux.Unlock()
 
 		err := conn.Invoke(ctx, input, output)
+		// Request whose connection was closed may still complete in the
+		// resumed MTProto session (result of acknowledged request, or state
+		// query of not acknowledged one), otherwise it is either safe to
+		// resend (rpc.ErrEngineClosed) or not.
+		err = mtproto.AwaitSession(ctx, err)
 		if err == nil || !errRetryableOnNewConn(err) {
 			return err
 		}

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/go-faster/errors"
+
 	"github.com/gotd/log"
 
 	"github.com/gotd/td/bin"
@@ -33,6 +34,39 @@ var errRejected = errors.New("message rejected")
 // until acknowledged (TDLib check_packet code 1 -> send_ack, Telegram Desktop
 // and Android ack before deduplication).
 var errDuplicate = errors.Wrap(errRejected, "already processed")
+
+// errTooOld is returned on message with msg_id lower than all stored msg_id
+// values: it is impossible to tell whether it was processed, so the session
+// can not be trusted anymore. Such message is neither handled nor
+// acknowledged and the session is reset, like TDLib (check_packet code 2 ->
+// on_session_failed), Telegram Desktop (TooOld -> ResetSession) and Telegram
+// Android (isMessageIdProcessed == 2 -> recreateSession) do.
+var errTooOld = errors.Wrap(errRejected, "too old")
+
+// checkReceived checks msg_id against replay protection buffer.
+func checkReceived(buf MessageBuf, msgID int64) proto.MessageIDStatus {
+	if b, ok := buf.(interface {
+		Check(id int64) proto.MessageIDStatus
+	}); ok {
+		return b.Check(msgID)
+	}
+	if buf.Consume(msgID) {
+		return proto.MessageIDAccepted
+	}
+	return proto.MessageIDDuplicate
+}
+
+// receivedErr maps msg_id check result to error.
+func receivedErr(status proto.MessageIDStatus, msgID int64) error {
+	switch status {
+	case proto.MessageIDDuplicate:
+		return errors.Wrapf(errDuplicate, "duplicate message id %d", msgID)
+	case proto.MessageIDTooOld:
+		return errors.Wrapf(errTooOld, "message id %d is lower than all stored", msgID)
+	default:
+		return nil
+	}
+}
 
 func checkMessageID(now time.Time, rawID int64) error {
 	id := proto.MessageID(rawID)
@@ -67,23 +101,40 @@ func (c *Conn) decryptMessage(b *bin.Buffer) (*crypto.EncryptedMessageData, erro
 	if msg.SessionID != session.ID {
 		return nil, errors.Wrapf(errRejected, "invalid session (got %d, expected %d)", msg.SessionID, session.ID)
 	}
-	if err := checkMessageID(c.clock.Now(), msg.MessageID); err != nil {
+	now := c.clock.Now()
+	if t := proto.MessageID(msg.MessageID).Type(); t == proto.MessageFromServer || t == proto.MessageServerResponse {
+		// Measure server time before validating msg_id time: with a skewed
+		// local clock every server message would be rejected otherwise
+		// (TDLib AuthData::check_packet). Replayed messages can not move
+		// server time forward, and difference never decreases on Observe.
+		c.serverTime.Observe(msg.MessageID, now)
+	}
+	if err := checkMessageID(c.serverTime.Now(now), msg.MessageID); err != nil {
 		return nil, errors.Wrapf(err, "bad message id %d", msg.MessageID)
 	}
-	if !c.receivedIDs().Consume(msg.MessageID) {
-		return msg, errors.Wrapf(errDuplicate, "duplicate or too low message id %d", msg.MessageID)
+	if err := receivedErr(checkReceived(c.receivedIDs(), msg.MessageID), msg.MessageID); err != nil {
+		return msg, err
 	}
 
 	return msg, nil
 }
 
 func (c *Conn) consumeMessage(ctx context.Context, buf *bin.Buffer) error {
+	if c.sessionResetting.Load() {
+		// Session is being reset, connection is about to be closed: messages
+		// of the dropped session must not be handled or acknowledged.
+		return nil
+	}
 	msg, err := c.decryptMessage(buf)
 	if errors.Is(err, errDuplicate) {
 		c.log.Debug(ctx, "Ignoring already processed message", log.Error(err))
 		if msg.SeqNo&0x01 != 0 {
 			return c.enqueueAck(ctx, msg.MessageID)
 		}
+		return nil
+	}
+	if errors.Is(err, errTooOld) {
+		c.requestSessionReset(sessionResetTooOld)
 		return nil
 	}
 	if errors.Is(err, errRejected) {
@@ -98,7 +149,14 @@ func (c *Conn) consumeMessage(ctx context.Context, buf *bin.Buffer) error {
 	// slow UpdateHandler); liveness must not wait on them.
 	c.recvMessages.Inc()
 
-	if err := c.handleMessage(msg.MessageID, &bin.Buffer{Buf: msg.Data()}); err != nil {
+	body := &bin.Buffer{Buf: msg.Data()}
+	if id, err := body.PeekID(); err == nil && id == proto.MessageContainerTypeID {
+		// Container itself is not content-related (even seqno), but every inner
+		// message must be acknowledged and deduplicated on its own.
+		return c.consumeContainer(ctx, body)
+	}
+
+	if err := c.handleMessage(msg.MessageID, body); err != nil {
 		// Probably we can return here, but this will shutdown whole
 		// connection which can be unexpected.
 		c.log.Warn(ctx, "Error while handling message", log.Error(err))
@@ -111,6 +169,48 @@ func (c *Conn) consumeMessage(ctx context.Context, buf *bin.Buffer) error {
 		return c.enqueueAck(ctx, msg.MessageID)
 	}
 
+	return nil
+}
+
+// consumeContainer handles inner messages of msg_container.
+//
+// Like the outer message, every inner message is acknowledged before
+// deduplication if it is content-related (TDLib on_slice_packet, Telegram
+// Desktop and Android addMessageToConfirm), and then checked against the
+// replay protection buffer, so messages resent by server are not handled
+// twice.
+func (c *Conn) consumeContainer(ctx context.Context, b *bin.Buffer) error {
+	var container proto.MessageContainer
+	if err := container.Decode(b); err != nil {
+		c.log.Warn(ctx, "Failed to decode container", log.Error(err))
+		return nil
+	}
+	for _, inner := range container.Messages {
+		if c.sessionResetting.Load() {
+			return nil
+		}
+		status := checkReceived(c.receivedIDs(), inner.ID)
+		if status == proto.MessageIDTooOld {
+			c.log.Warn(ctx, "Too old message in container", log.Int64("msg_id", inner.ID))
+			c.requestSessionReset(sessionResetTooOld)
+			return nil
+		}
+		if inner.SeqNo&0x01 != 0 {
+			if err := c.enqueueAck(ctx, inner.ID); err != nil {
+				return err
+			}
+		}
+		if status == proto.MessageIDDuplicate {
+			c.log.Debug(ctx, "Ignoring already processed message in container", log.Int64("msg_id", inner.ID))
+			continue
+		}
+		if err := c.handleMessage(inner.ID, &bin.Buffer{Buf: inner.Body}); err != nil {
+			c.log.Warn(ctx, "Error while handling message in container",
+				log.Int64("msg_id", inner.ID),
+				log.Error(err),
+			)
+		}
+	}
 	return nil
 }
 
@@ -149,9 +249,6 @@ func (c *Conn) handleAuthKeyNotFound(ctx context.Context) error {
 	if c.session().ID == 0 {
 		// The 404 error can also be caused by zero session id.
 		// See https://github.com/gotd/td/issues/107
-		//
-		// We should recover from this in createAuthKey, but in general
-		// this code branch should be unreachable.
 		c.log.Warn(ctx, "BUG: zero session id found")
 	}
 	if c.pfs {
@@ -159,14 +256,9 @@ func (c *Conn) handleAuthKeyNotFound(ctx context.Context) error {
 		// recreate transport and re-bind, not regenerate permanent key in-place.
 		return errors.Wrap(ErrPFSReconnectRequired, "temporary auth key not found in pfs mode")
 	}
-	c.log.Warn(ctx, "Re-generating keys (server not found key that we provided)")
-	if err := c.createAuthKey(ctx); err != nil {
-		return errors.Wrap(err, "unable to create auth key")
-	}
-	c.log.Info(ctx, "Re-created auth keys")
-	// Request will be retried by ack loop.
-	// Probably we can speed-up this.
-	return nil
+	// Do not regenerate the permanent key in place: see ErrAuthKeyNotFound.
+	c.log.Warn(ctx, "Server does not know auth key, it must be verified")
+	return ErrAuthKeyNotFound
 }
 
 func (c *Conn) readLoop(ctx context.Context) (err error) {

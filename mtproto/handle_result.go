@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/go-faster/errors"
+
 	"github.com/gotd/log"
 
 	"github.com/gotd/td/bin"
@@ -57,7 +58,11 @@ func (c *Conn) handleResult(b *bin.Buffer) error {
 			log.Int("err_code", rpcErr.ErrorCode),
 			log.String("err_msg", rpcErr.ErrorMessage),
 		)
-		c.rpc.NotifyError(res.RequestMessageID, tgerr.New(rpcErr.ErrorCode, rpcErr.ErrorMessage))
+		err := tgerr.New(rpcErr.ErrorCode, rpcErr.ErrorMessage)
+		if c.orphanRequest(res.RequestMessageID) && c.state().deliverError(res.RequestMessageID, err) {
+			return nil
+		}
+		c.rpc.NotifyError(res.RequestMessageID, err)
 
 		return nil
 	}
@@ -65,5 +70,15 @@ func (c *Conn) handleResult(b *bin.Buffer) error {
 		return c.handlePong(b)
 	}
 
+	if c.orphanRequest(res.RequestMessageID) && c.state().deliverResult(res.RequestMessageID, b) {
+		c.log.Debug(ctx, "Result delivered to request of resumed session", msgID)
+		return nil
+	}
 	return c.rpc.NotifyResult(res.RequestMessageID, b)
+}
+
+// orphanRequest reports whether request may be an orphan of shared session:
+// it is not tracked by rpc engine of this connection.
+func (c *Conn) orphanRequest(msgID int64) bool {
+	return c.sharedSession && !c.rpc.Pending(msgID)
 }

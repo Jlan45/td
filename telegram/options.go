@@ -114,12 +114,21 @@ type Options struct {
 	// PingTimeout is how long to wait for liveness after a ping.
 	// Default: 15s (applied by mtproto when zero).
 	PingTimeout time.Duration
-	// PingProgressAware switches ping liveness to progress-aware mode.
-	// See mtproto.Options.
+	// PingStrictPong requires the pong of each ping to arrive within
+	// PingTimeout. By default any received data within PingTimeout after a
+	// ping proves the connection alive. See mtproto.Options.
+	PingStrictPong bool
+	// PingProgressAware enabled progress-aware liveness.
+	//
+	// Deprecated: progress-aware liveness is the default, use PingStrictPong to
+	// disable it. The field has no effect.
 	PingProgressAware bool
 	// PingMaxWait bounds unanswered pings while data keeps arriving.
 	// Zero disables the bound. See mtproto.Options.
 	PingMaxWait time.Duration
+	// DisableContainers disables packing of concurrently sent messages into
+	// msg_container. See mtproto.Options.
+	DisableContainers bool
 	// EnablePFS enables Perfect Forward Secrecy with temporary auth keys.
 	EnablePFS bool
 	// TempKeyTTL controls temporary key lifetime in seconds.

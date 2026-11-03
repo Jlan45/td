@@ -55,17 +55,26 @@ type Options struct {
 	PingTimeout time.Duration
 	// PingInterval is duration between ping_delay_disconnect request.
 	PingInterval time.Duration
-	// PingProgressAware switches ping liveness from "pong of this ping must arrive
-	// within PingTimeout" to "something must be received within PingTimeout after
-	// a ping is sent". Any inbound bytes (if the transport reports them) or any
-	// decrypted message extends the deadline, mirroring TDLib, where any packet
-	// counts as a pong because "real pong can be delayed by many big packets".
-	// Pings keep being sent every PingInterval while a pong is outstanding.
+	// PingStrictPong switches ping liveness back to the historical mode: the
+	// pong of each ping must arrive within PingTimeout, otherwise the
+	// connection is considered dead.
 	//
-	// Default is false, which preserves the historical behavior.
+	// By default liveness is progress-aware: something must be received within
+	// PingTimeout after a ping is sent. Any inbound bytes (if the transport
+	// reports them) or any decrypted message extends the deadline, mirroring
+	// official clients: in TDLib any packet counts as a pong because "real pong
+	// can be delayed by many big packets", Telegram Desktop and Android wait
+	// for any received data. Pings keep being sent every PingInterval while a
+	// pong is outstanding.
+	PingStrictPong bool
+	// PingProgressAware enabled progress-aware liveness.
+	//
+	// Deprecated: progress-aware liveness is the default, use PingStrictPong to
+	// disable it. The field has no effect.
 	PingProgressAware bool
 	// PingMaxWait bounds how long a ping may stay unanswered in progress-aware
-	// mode even if data keeps arriving. Zero disables the bound.
+	// mode even if data keeps arriving. Zero disables the bound. Ignored with
+	// PingStrictPong.
 	PingMaxWait time.Duration
 	// RequestTimeout is function which returns request timeout for given type ID.
 	RequestTimeout func(req uint32) time.Duration
@@ -88,6 +97,10 @@ type Options struct {
 	PermKey crypto.AuthKey
 	// Salt from server that can be used to restore previous connection.
 	Salt int64
+
+	// DisableContainers disables packing of messages written concurrently into
+	// msg_container (see write_batch.go): every message is sent on its own.
+	DisableContainers bool
 
 	// Session is MTProto session state shared by successive connections of one
 	// logical client session: a connection resumes the session started by a

@@ -5,10 +5,12 @@ import (
 	"sync"
 
 	"github.com/go-faster/errors"
+
 	"github.com/gotd/log"
 
 	"github.com/gotd/td/crypto"
 	"github.com/gotd/td/proto"
+	"github.com/gotd/td/rpc"
 )
 
 // SessionState is MTProto session state (session_id and content message
@@ -44,10 +46,22 @@ type SessionState struct {
 	// protection). On resume the server may resend messages that were not
 	// acknowledged on the previous connection; they must not be handled twice.
 	received *proto.MessageIDBuf
+
+	// gen is incremented when session ends (new session or reset).
+	gen uint64
+	// closed is set by Close: the session can not be resumed anymore.
+	closed bool
+	// requests are requests of the session, see session_requests.go.
+	requests map[int64]*pendingRequest
+	// stateQueries maps msgs_state_req msg_id to queried msg_ids.
+	stateQueries map[int64][]int64
+	// orphaned is signaled when a request becomes orphan.
+	orphaned chan struct{}
 }
 
-// receivedBufSize is the number of last received msg_id values to store.
-const receivedBufSize = 100
+// receivedBufSize is the number of last received msg_id values to store, same
+// as Telegram Desktop kIdsBufferSize.
+const receivedBufSize = 400
 
 // NewSessionState returns empty session state.
 func NewSessionState() *SessionState {
@@ -72,6 +86,7 @@ func (s *SessionState) start(key crypto.AuthKey, id int64) {
 	s.id = id
 	s.sentContentMessages = 0
 	s.received = proto.NewMessageIDBuf(receivedBufSize)
+	s.endRequests()
 }
 
 // receivedBuf returns received msg_id buffer of the current session, nil if
@@ -89,6 +104,7 @@ func (s *SessionState) reset() {
 	s.id = 0
 	s.sentContentMessages = 0
 	s.received = nil
+	s.endRequests()
 }
 
 // ID returns current session id or zero if there is no session.
@@ -118,6 +134,11 @@ func (s *SessionState) next(newID func(t proto.MessageType) int64, content bool)
 // the next connection starts a new one.
 var ErrSessionReset = errors.New("mtproto session reset")
 
+// errWriteSessionReset is returned by writes after session reset was
+// requested. The message was not sent, so the request is safe to retry on a
+// new connection (rpc.ErrEngineClosed).
+var errWriteSessionReset = errors.Wrap(rpc.ErrEngineClosed, "mtproto session reset")
+
 // state returns session state of the connection.
 func (c *Conn) state() *SessionState {
 	c.stateOnce.Do(func() {
@@ -137,11 +158,25 @@ func (c *Conn) receivedIDs() MessageBuf {
 	return c.messageIDBuf
 }
 
+// Reasons of session reset, see requestSessionReset.
+const (
+	// sessionResetTooOld: received msg_id lower than all stored ones.
+	sessionResetTooOld = "too_old_msg_id"
+	// sessionResetBadSeqNo: bad_msg_notification 32 or 33.
+	sessionResetBadSeqNo = "bad_msg_seqno"
+)
+
 // requestSessionReset forgets the current session and asks Run to restart the
 // connection.
-func (c *Conn) requestSessionReset(code int) {
+//
+// Until the connection is closed it must not continue the dropped session:
+// incoming messages are ignored and writes fail with ErrSessionReset.
+func (c *Conn) requestSessionReset(reason string) {
+	if c.sessionResetting.Swap(true) {
+		return
+	}
 	c.state().reset()
-	c.log.Warn(context.Background(), "Resetting session after bad msg_seqno", log.Int("code", code))
+	c.log.Warn(context.Background(), "Resetting session", log.String("reason", reason))
 	select {
 	case c.sessionResetCh <- struct{}{}:
 	default:

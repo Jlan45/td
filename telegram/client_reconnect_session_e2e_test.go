@@ -122,3 +122,65 @@ func TestClientReconnectKeepsSession(t *testing.T) {
 		require.Equal(t, sessions[0], id, "all requests must use one MTProto session across reconnects")
 	}
 }
+
+// NetworkChanged restarts the primary connection immediately, keeping the
+// MTProto session.
+func TestClientNetworkChangedRestartsConnection(t *testing.T) {
+	var (
+		mux      sync.Mutex
+		sessions []int64
+		called   = make(chan struct{}, 16)
+	)
+	resolver := &killableResolver{}
+
+	testCluster(transport.Intermediate, false, func(s clusterSetup) {
+		s.Cluster.Dispatch(2, "server").HandleFunc(tg.UsersGetUsersRequestTypeID,
+			func(server *tgtest.Server, req *tgtest.Request) error {
+				mux.Lock()
+				sessions = append(sessions, req.Session.ID)
+				mux.Unlock()
+				select {
+				case called <- struct{}{}:
+				default:
+				}
+				return server.SendVector(req, &tg.User{ID: 10, AccessHash: 10, Username: "username"})
+			},
+		)
+	}, func(ctx context.Context, c clientSetup) error {
+		opts := c.Options
+		resolver.Resolver = opts.Resolver
+		opts.Resolver = resolver
+		client := telegram.NewClient(1, "hash", opts)
+
+		return client.Run(ctx, func(ctx context.Context) error {
+			select {
+			case <-called:
+			case <-time.After(30 * time.Second):
+				return errors.New("users.getUsers was not called")
+			}
+			before := resolver.dials()
+			client.NetworkChanged(true)
+
+			deadline := time.After(30 * time.Second)
+			for resolver.dials() == before {
+				select {
+				case <-deadline:
+					return errors.New("connection was not restarted")
+				case <-time.After(10 * time.Millisecond):
+				}
+			}
+			if _, err := client.Self(ctx); err != nil {
+				return errors.Wrap(err, "self after network change")
+			}
+			c.Complete()
+			return nil
+		})
+	})(t)
+
+	mux.Lock()
+	defer mux.Unlock()
+	require.GreaterOrEqual(t, len(sessions), 2)
+	for _, id := range sessions {
+		require.Equal(t, sessions[0], id, "session must be kept across restart")
+	}
+}

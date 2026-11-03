@@ -8,7 +8,6 @@ import (
 	"github.com/gotd/log"
 
 	"github.com/gotd/td/exchange"
-	"github.com/gotd/td/mtproto"
 	"github.com/gotd/td/pool"
 )
 
@@ -37,8 +36,8 @@ func (c *Client) handleCDNConnDead(dcID int, err error) {
 		return
 	}
 
-	if !errors.Is(err, mtproto.ErrPFSDropKeysRequired) {
-		// Keep legacy callback semantics for all non-PFS errors.
+	if !dropKeyRequired(err) {
+		// Keep legacy callback semantics for all other errors.
 		if c.onDead != nil {
 			c.onDead(err)
 		}

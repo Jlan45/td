@@ -53,3 +53,20 @@ func (c *Client) handleUpdates(b *bin.Buffer) error {
 	}
 	return c.processUpdates(updates)
 }
+
+// onSessionCreated is called when server created a new session for the
+// updates connection: updates sent to the previous session may have been
+// lost, so update state is refreshed with getDifference by passing
+// updatesTooLong to the handler, like TDLib does for the main session.
+func (c *Client) onSessionCreated() {
+	if c.noUpdatesMode {
+		return
+	}
+	// Handler may invoke getDifference which needs the read loop, so it must
+	// not block the read loop calling this method.
+	go func() {
+		if err := c.processUpdates(&tg.UpdatesTooLong{}); err != nil {
+			c.log.Warn(c.ctx, "Failed to handle updatesTooLong after new session", log.Error(err))
+		}
+	}()
+}

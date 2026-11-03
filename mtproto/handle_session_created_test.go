@@ -28,11 +28,15 @@ func TestConn_handleSessionCreated(t *testing.T) {
 		now := time.Unix(100, 0)
 		clock := neo.NewTime(now)
 		gotSession := tdsync.NewReady()
+		serverTime := &proto.ServerTime{}
+		// Server is ahead of local clock.
+		serverTime.Observe(int64(proto.NewMessageID(now.Add(time.Hour), proto.MessageFromServer)), now)
 		conn := Conn{
 			clock:      clock,
 			log:        log.For(logzap.New(zap.New(logger))),
 			gotSession: gotSession,
 			handler:    newTestHandler(),
+			serverTime: serverTime,
 		}
 
 		buf := bin.Buffer{}
@@ -53,7 +57,7 @@ func TestConn_handleSessionCreated(t *testing.T) {
 
 		msgs := logs.All()
 		a.Len(msgs, 1)
-		a.Equal("Local clock needs synchronization", msgs[0].Message)
+		a.Equal("Local clock differs from server time, compensating", msgs[0].Message)
 	})
 	t.Run("Invalid", func(t *testing.T) {
 		conn := Conn{}
