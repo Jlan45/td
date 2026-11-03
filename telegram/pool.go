@@ -199,6 +199,12 @@ func (c *Client) dc(
 		// require auth.export/import bootstrap.
 		return p, nil
 	}
+	if dcID == c.session.Load().DC {
+		// The primary key is already authorized: a data session to the primary
+		// DC is just another session_id over it and needs no re-authorization,
+		// while exporting authorization to the current DC is invalid.
+		return p, nil
+	}
 
 	// First transfer is done explicitly to preserve old behavior: return
 	// transfer errors from DC pool creation. Setup callback remains enabled for
